@@ -1,6 +1,65 @@
 @startuml containers
-' Подключение библиотеки C4-PlantUML (уровень контейнеров)
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
 
-!include <C4/C4_Containers>
+title Диаграмма контейнеров: экосистема «Тёплый дом» (To-Be)
 
+Person(user, "Пользователь", "Владелец дома. Регистрирует новые устройства по серийному номеру или QR-коду, подключает модули, управляет устройствами, смотрит показания")
+
+System_Ext(devices, "Устройства в доме", "Датчики, контроллеры отопления, устройства партнёров")
+
+System_Boundary(eco, "Экосистема «Тёплый дом»") {
+  Container(web, "Веб-приложение", "SPA", "Интерфейс пользователя в браузере")
+  Container(mobile, "Мобильное приложение", "iOS / Android", "Интерфейс пользователя на смартфоне")
+
+  Container(api_gw, "API Gateway", "Kong / Nginx", "Единая точка входа: маршрутизация, проверка JWT, rate limiting")
+
+  Container(user_svc, "User & House Service", "Go", "Регистрация и аутентификация пользователей, управление домами")
+  ContainerDb(user_db, "User DB", "PostgreSQL", "User, House")
+
+  Container(device_svc, "Device Management Service", "Go", "Модули, каталог типов устройств, регистрация устройств и выдача учётных данных, команды")
+  ContainerDb(device_db, "Device DB", "PostgreSQL", "Module, HouseModule, DeviceType, Device, DeviceCommand, Outbox")
+
+  Container(telemetry_svc, "Telemetry Service", "Go", "Приём, хранение и выдача телеметрии")
+  ContainerDb(telemetry_db, "Telemetry DB", "TimescaleDB", "TelemetryData")
+
+  Container(device_gw, "Device Gateway", "Go", "Адаптер протоколов устройств, мост MQTT ↔ Kafka")
+  ContainerQueue(mqtt, "MQTT Broker", "EMQX", "Канал связи с устройствами: команды и телеметрия")
+  ContainerQueue(kafka, "Event Bus", "Apache Kafka", "Асинхронный обмен событиями между сервисами")
+}
+
+' ===== Пользователь и клиенты =====
+Rel(user, web, "Использует", "HTTPS")
+Rel(user, mobile, "Использует", "HTTPS")
+Rel(web, api_gw, "API-запросы", "REST/HTTPS")
+Rel(mobile, api_gw, "API-запросы", "REST/HTTPS")
+
+' ===== Синхронные вызовы через API Gateway =====
+Rel(api_gw, user_svc, "Пользователи, дома, аутентификация", "REST, синхронно")
+Rel(api_gw, device_svc, "Регистрация устройства, модули, команды", "REST, синхронно")
+Rel(api_gw, telemetry_svc, "Текущие и исторические показания", "REST, синхронно")
+
+' ===== Сервисы и их БД =====
+Rel(user_svc, user_db, "Чтение/запись", "SQL")
+Rel(device_svc, device_db, "Чтение/запись", "SQL")
+Rel(telemetry_svc, telemetry_db, "Чтение/запись", "SQL")
+
+' ===== Межсервисные синхронные вызовы =====
+Rel(device_svc, user_svc, "Проверка владения домом", "REST, синхронно")
+Rel(mqtt, device_svc, "Проверяет учётные данные устройства при подключении", "HTTP auth hook, синхронно")
+
+' ===== Асинхронное взаимодействие через Kafka =====
+Rel(user_svc, kafka, "house.events", "Kafka, async")
+Rel(device_svc, kafka, "device.commands, device.events", "Kafka, async")
+Rel(kafka, device_svc, "device.command.status, device.status, house.events", "Kafka, async")
+Rel(device_gw, kafka, "telemetry.raw, device.command.status, device.status", "Kafka, async")
+Rel(kafka, device_gw, "device.commands, device.events", "Kafka, async")
+Rel(kafka, telemetry_svc, "telemetry.raw, device.events", "Kafka, async")
+
+' ===== Связь с устройствами =====
+Rel(device_gw, mqtt, "Публикует команды", "MQTT")
+Rel(mqtt, device_gw, "Телеметрия, подтверждения команд, статус", "MQTT, подписка")
+Rel(mqtt, devices, "Доставляет команды управления", "MQTT over TLS, подписка устройства")
+Rel(devices, mqtt, "Подключаются с учётными данными, публикуют телеметрию и подтверждения команд", "MQTT over TLS")
+
+SHOW_LEGEND()
 @enduml

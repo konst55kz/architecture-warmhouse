@@ -1,0 +1,35 @@
+@startuml component-user-house
+!include <C4/C4_Component>
+
+title Диаграмма компонентов: User & House Service
+
+Container(api_gw, "API Gateway", "Kong / Nginx", "Единая точка входа")
+Container(device_svc, "Device Management Service", "Go", "Управление устройствами")
+ContainerQueue(kafka, "Event Bus", "Apache Kafka", "События между сервисами")
+ContainerDb(user_db, "User DB", "PostgreSQL", "User, House, Outbox")
+
+Container_Boundary(user_svc, "User & House Service") {
+  Component(rest_api, "REST API", "Go, net/http", "Публичные эндпоинты пользователей и домов, внутренний эндпоинт проверки владения")
+  Component(auth, "Auth Component", "Go", "Регистрация, вход, хеширование паролей, выпуск JWT и публикация ключей (JWKS)")
+  Component(user_manager, "User Manager", "Go", "Профиль пользователя")
+  Component(house_manager, "House Manager", "Go", "Создание, изменение и удаление домов, проверка владения")
+  Component(outbox_relay, "Outbox Relay", "Go, Kafka client", "Публикация событий из таблицы Outbox")
+  Component(repository, "Repository", "Go, pgx", "Доступ к User DB")
+}
+
+Rel(api_gw, rest_api, "Запросы пользователя, получение JWKS", "REST")
+Rel(device_svc, rest_api, "Проверка владения домом", "REST")
+
+Rel(rest_api, auth, "Регистрация и вход")
+Rel(rest_api, user_manager, "Профиль")
+Rel(rest_api, house_manager, "Дома и проверка владения")
+
+Rel(auth, repository, "Учётные данные")
+Rel(user_manager, repository, "User")
+Rel(house_manager, repository, "House + событие в Outbox")
+Rel(outbox_relay, repository, "Чтение неотправленных событий")
+Rel(outbox_relay, kafka, "house.events", "Kafka")
+Rel(repository, user_db, "Чтение/запись", "SQL")
+
+SHOW_LEGEND()
+@enduml

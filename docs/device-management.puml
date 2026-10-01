@@ -1,0 +1,61 @@
+@startuml component-device-management
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+title Диаграмма компонентов: Device Management Service
+
+Container(api_gw, "API Gateway", "Kong / Nginx", "Единая точка входа")
+ContainerQueue(mqtt, "MQTT Broker", "EMQX", "Связь с устройствами")
+Container(user_svc, "User & House Service", "Go", "Пользователи и дома")
+ContainerQueue(kafka, "Event Bus", "Apache Kafka", "События между сервисами")
+ContainerDb(device_db, "Device DB", "PostgreSQL", "Module, HouseModule, DeviceType, Device, DeviceCommand, Outbox")
+
+Container_Boundary(device_svc, "Device Management Service") {
+  Component(rest_api, "REST API", "Go, net/http", "Эндпоинты устройств, модулей и команд. Валидация запросов, извлечение user_id из JWT")
+  Component(auth_hook, "Device Auth Handler", "Go, net/http", "HTTP auth hook для MQTT-брокера: проверка учётных данных устройства и прав на топики")
+
+  Component(registration, "Device Registration", "Go", "Регистрация устройства: проверка владения домом, поиск типа по серийному номеру, проверка подключённого модуля, сохранение хеша ключа")
+  Component(catalog, "Module & Catalog Manager", "Go", "Каталог модулей и типов устройств, подключение и отключение модулей в доме")
+  Component(command_handler, "Command Handler", "Go", "Проверка команды по capabilities типа устройства, создание DeviceCommand в статусе pending")
+  Component(state_manager, "Device State Manager", "Go", "Обновление статуса устройств (online/offline, last_seen_at) и статусов выполнения команд")
+
+  Component(event_consumer, "Event Consumer", "Go, Kafka client", "Чтение device.status, device.command.status, house.events и передача обработчикам")
+  Component(outbox_relay, "Outbox Relay", "Go, Kafka client", "Чтение таблицы Outbox и публикация событий в Kafka (Transactional Outbox)")
+
+  Component(user_client, "User Service Client", "Go, HTTP client", "Синхронные вызовы User & House Service с таймаутами и circuit breaker")
+  Component(repository, "Repository", "Go, pgx", "Доступ к Device DB, управление транзакциями")
+}
+
+' ===== Входящие запросы =====
+Rel(api_gw, rest_api, "Запросы пользователя", "REST")
+Rel(mqtt, auth_hook, "Проверка подключения устройства", "HTTP")
+
+' ===== REST API -> бизнес-компоненты =====
+Rel(rest_api, registration, "Регистрация и удаление устройства")
+Rel(rest_api, catalog, "Модули и типы устройств")
+Rel(rest_api, command_handler, "Отправка команды")
+Rel(rest_api, state_manager, "Чтение состояния устройств и команд")
+
+' ===== Бизнес-логика =====
+Rel(registration, user_client, "Проверка владения домом")
+Rel(registration, catalog, "Определение типа устройства и проверка модуля")
+Rel(command_handler, catalog, "Проверка capabilities типа устройства")
+Rel(auth_hook, repository, "Поиск устройства и хеша ключа")
+
+' ===== Асинхронные события =====
+Rel(kafka, event_consumer, "device.status, device.command.status, house.events", "Kafka")
+Rel(event_consumer, state_manager, "Статусы устройств и команд")
+Rel(event_consumer, registration, "Удаление дома: отвязка устройств")
+Rel(outbox_relay, kafka, "device.commands, device.events", "Kafka")
+
+' ===== Доступ к данным =====
+Rel(registration, repository, "Device + событие в Outbox")
+Rel(catalog, repository, "Module, DeviceType, HouseModule")
+Rel(command_handler, repository, "DeviceCommand + событие в Outbox")
+Rel(state_manager, repository, "Статусы Device и DeviceCommand")
+Rel(outbox_relay, repository, "Чтение и отметка отправленных событий")
+Rel(repository, device_db, "Чтение/запись", "SQL")
+
+Rel(user_client, user_svc, "Проверка владения домом", "REST")
+
+SHOW_LEGEND()
+@enduml

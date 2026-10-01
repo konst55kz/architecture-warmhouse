@@ -1,0 +1,40 @@
+@startuml component-telemetry
+!include <C4/C4_Component>
+
+title Диаграмма компонентов: Telemetry Service
+
+Container(api_gw, "API Gateway", "Kong / Nginx", "Единая точка входа")
+ContainerQueue(kafka, "Event Bus", "Apache Kafka", "События между сервисами")
+ContainerDb(telemetry_db, "Telemetry DB", "TimescaleDB", "TelemetryData, DeviceRegistry")
+
+Container_Boundary(telemetry_svc, "Telemetry Service") {
+  Component(rest_api, "REST API", "Go, net/http", "Эндпоинты текущих показаний и истории за период")
+  Component(query_service, "Telemetry Query Service", "Go", "Проверка доступа пользователя к устройству, выборка и агрегация данных по интервалам")
+
+  Component(telemetry_consumer, "Telemetry Consumer", "Go, Kafka client", "Чтение telemetry.raw")
+  Component(ingestion, "Telemetry Ingestion", "Go", "Валидация и нормализация показаний, отбрасывание данных незарегистрированных устройств, пакетная запись")
+
+  Component(registry_consumer, "Device Events Consumer", "Go, Kafka client", "Чтение device.events")
+  Component(device_registry, "Device Registry", "Go", "Локальная копия связи device_id → house_id, owner_id для проверки доступа без синхронных вызовов")
+
+  Component(repository, "Repository", "Go, pgx", "Доступ к TimescaleDB: пакетная вставка, запросы с time_bucket")
+}
+
+Rel(api_gw, rest_api, "Запросы показаний", "REST")
+Rel(rest_api, query_service, "Получение данных")
+Rel(query_service, device_registry, "Проверка, что устройство принадлежит пользователю")
+Rel(query_service, repository, "Чтение телеметрии")
+
+Rel(kafka, telemetry_consumer, "telemetry.raw", "Kafka")
+Rel(telemetry_consumer, ingestion, "Пакет показаний")
+Rel(ingestion, device_registry, "Проверка, что устройство зарегистрировано")
+Rel(ingestion, repository, "Пакетная запись")
+
+Rel(kafka, registry_consumer, "device.events", "Kafka")
+Rel(registry_consumer, device_registry, "Добавление и удаление устройств")
+Rel(device_registry, repository, "Чтение/запись реестра")
+
+Rel(repository, telemetry_db, "Чтение/запись", "SQL")
+
+SHOW_LEGEND()
+@enduml

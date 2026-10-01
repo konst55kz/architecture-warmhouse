@@ -1,0 +1,173 @@
+@startuml code-device-state-manager
+title Диаграмма кода: Device State Manager (Device Management Service)
+
+skinparam classAttributeIconSize 0
+hide empty members
+
+' ===== Входящие порты: кто вызывает менеджер =====
+package "consumer" {
+  class EventConsumer <<struct>> {
+    - handler : StateHandler
+    + Run(ctx) error
+    - route(msg : kafka.Message) error
+  }
+
+  interface StateHandler {
+    + HandleDeviceStatus(ctx, e : DeviceStatusEvent) error
+    + HandleCommandStatus(ctx, e : CommandStatusEvent) error
+  }
+}
+
+package "api" {
+  class DeviceHandler <<struct>> {
+    - reader : StateReader
+    + GetDeviceState(w, r)
+    + GetCommandStatus(w, r)
+  }
+
+  interface StateReader {
+    + GetDeviceState(ctx, deviceID : UUID) (Device, error)
+    + GetCommand(ctx, commandID : UUID) (DeviceCommand, error)
+  }
+}
+
+' ===== Device State Manager =====
+package "state" {
+  class DeviceStateManager <<struct>> {
+    - devices : DeviceRepository
+    - commands : CommandRepository
+    - clock : Clock
+    + NewDeviceStateManager(d, c, clock) *DeviceStateManager
+    + HandleDeviceStatus(ctx, e : DeviceStatusEvent) error
+    + HandleCommandStatus(ctx, e : CommandStatusEvent) error
+    + GetDeviceState(ctx, deviceID : UUID) (Device, error)
+    + GetCommand(ctx, commandID : UUID) (DeviceCommand, error)
+  }
+
+  interface DeviceRepository {
+    + GetByID(ctx, id : UUID) (Device, error)
+    + UpdateStatus(ctx, d : Device) error
+  }
+
+  interface CommandRepository {
+    + GetByID(ctx, id : UUID) (DeviceCommand, error)
+    + UpdateStatus(ctx, c : DeviceCommand) error
+  }
+
+  interface Clock {
+    + Now() time.Time
+  }
+}
+
+' ===== Доменная модель =====
+package "domain" {
+  class Device <<struct>> {
+    + ID : UUID
+    + HouseID : UUID
+    + TypeID : UUID
+    + SerialNumber : string
+    + Status : DeviceStatus
+    + LastSeenAt : *time.Time
+    + ApplyStatus(s : DeviceStatus, at : time.Time) error
+  }
+
+  enum DeviceStatus {
+    Registered
+    Online
+    Offline
+    Error
+  }
+
+  class DeviceCommand <<struct>> {
+    + ID : UUID
+    + DeviceID : UUID
+    + Command : string
+    + Status : CommandStatus
+    + ExecutedAt : *time.Time
+    + ErrorMessage : string
+    + Acknowledge(at : time.Time) error
+    + Fail(reason : string, at : time.Time) error
+  }
+
+  enum CommandStatus {
+    Pending
+    Sent
+    Acknowledged
+    Failed
+  }
+}
+
+' ===== События из Kafka =====
+package "events" {
+  class DeviceStatusEvent <<struct>> {
+    + DeviceID : UUID
+    + Status : string
+    + Timestamp : time.Time
+  }
+
+  class CommandStatusEvent <<struct>> {
+    + CommandID : UUID
+    + DeviceID : UUID
+    + Status : string
+    + Error : string
+    + Timestamp : time.Time
+  }
+}
+
+' ===== Реализация хранилища =====
+package "repository" {
+  class PostgresDeviceRepository <<struct>> {
+    - pool : *pgxpool.Pool
+    + GetByID(ctx, id : UUID) (Device, error)
+    + UpdateStatus(ctx, d : Device) error
+  }
+
+  class PostgresCommandRepository <<struct>> {
+    - pool : *pgxpool.Pool
+    + GetByID(ctx, id : UUID) (DeviceCommand, error)
+    + UpdateStatus(ctx, c : DeviceCommand) error
+  }
+}
+
+' ===== Подсказки для раскладки =====
+StateHandler -[hidden]down- DeviceStateManager
+StateReader -[hidden]down- DeviceStateManager
+DeviceStateManager -[hidden]down- Device
+
+' ===== Связи =====
+EventConsumer --> StateHandler : вызывает
+DeviceHandler --> StateReader : вызывает
+
+DeviceStateManager ..|> StateHandler
+DeviceStateManager ..|> StateReader
+
+DeviceStateManager --> DeviceRepository
+DeviceStateManager --> CommandRepository
+DeviceStateManager --> Clock
+
+DeviceStateManager ..> DeviceStatusEvent : обрабатывает
+DeviceStateManager ..> CommandStatusEvent : обрабатывает
+DeviceStateManager ..> Device : изменяет
+DeviceStateManager ..> DeviceCommand : изменяет
+
+Device --> DeviceStatus
+DeviceCommand --> CommandStatus
+
+PostgresDeviceRepository ..|> DeviceRepository
+PostgresCommandRepository ..|> CommandRepository
+
+note bottom of Device
+  Игнорирует событие, если at < LastSeenAt
+  (события могут прийти не по порядку).
+  Обновляет LastSeenAt.
+end note
+
+note bottom of DeviceCommand
+  Допустимые переходы:
+  Pending/Sent → Acknowledged
+  Pending/Sent → Failed
+  Повторное событие для завершённой
+  команды игнорируется (идемпотентность).
+end note
+
+@enduml
