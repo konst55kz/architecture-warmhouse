@@ -1,0 +1,6 @@
+@startuml containers
+' Подключение библиотеки C4-PlantUML (уровень контейнеров)
+
+!include <C4/C4_Containers>
+
+@enduml
