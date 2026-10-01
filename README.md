@@ -77,6 +77,10 @@
 
 Здесь приложите ссылки на документацию API для микросервисов, которые вы спроектировали в первой части проектной работы. Для документирования используйте Swagger/OpenAPI или AsyncAPI.
 
+[openapi Device service](docs/api/openapi/device-management.openapi.yaml)
+[openapi Telemetry service](docs/api/openapi/telemetry.openapi.yaml)
+[asyncapi Events](docs/api/asyncapi/events.asyncapi.yaml)
+
 # Задание 5. Работа с docker и docker-compose
 
 Перейдите в apps.

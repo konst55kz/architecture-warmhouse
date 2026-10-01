@@ -1,0 +1,207 @@
+openapi: 3.0.3
+info:
+  title: Telemetry Service API
+  version: 1.0.0
+  description: |
+    API сервиса телеметрии экосистемы «Тёплый дом».
+
+    Сервис отдаёт показания устройств: последнее значение и историю за период с агрегацией.
+    Данные поступают в сервис асинхронно из топика `telemetry.raw`. Доступ к показаниям
+    проверяется по локальному реестру устройств (device_id → owner_id), который сервис
+    строит из событий `device.events`, без синхронных вызовов других сервисов.
+servers:
+  - url: https://api.warmhouse.example/api/v1
+    description: Публичный адрес через API Gateway
+tags:
+  - name: Telemetry
+    description: Показания датчиков
+security:
+  - bearerAuth: []
+
+paths:
+  /devices/{deviceId}/telemetry:
+    get:
+      tags: [Telemetry]
+      operationId: getTelemetry
+      summary: Получить показания устройства за период
+      description: |
+        Возвращает показания по одной метрике. Если задан `interval`, значения агрегируются
+        (среднее, минимум и максимум за интервал). Без `interval` возвращаются исходные точки.
+        Если `from` и `to` не заданы, возвращаются данные за последние 24 часа.
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: "a3e1b2c4-5d6f-4a7b-8c9d-0e1f2a3b4c5d"
+        - name: metric
+          in: query
+          required: true
+          description: Метрика
+          schema:
+            type: string
+            enum: [temperature, humidity]
+          example: temperature
+        - name: from
+          in: query
+          required: false
+          description: Начало периода (включительно)
+          schema:
+            type: string
+            format: date-time
+          example: "2026-10-01T00:00:00Z"
+        - name: to
+          in: query
+          required: false
+          description: Конец периода (не включительно)
+          schema:
+            type: string
+            format: date-time
+          example: "2026-10-01T06:00:00Z"
+        - name: interval
+          in: query
+          required: false
+          description: Интервал агрегации
+          schema:
+            type: string
+            enum: [5m, 1h, 1d]
+          example: 1h
+      responses:
+        '200':
+          description: Показания за период
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TelemetrySeries'
+              examples:
+                hourly:
+                  summary: Почасовая температура
+                  value:
+                    device_id: "a3e1b2c4-5d6f-4a7b-8c9d-0e1f2a3b4c5d"
+                    metric: "temperature"
+                    unit: "celsius"
+                    interval: "1h"
+                    from: "2026-10-01T00:00:00Z"
+                    to: "2026-10-01T03:00:00Z"
+                    points:
+                      - timestamp: "2026-10-01T00:00:00Z"
+                        avg: 21.4
+                        min: 21.1
+                        max: 21.8
+                      - timestamp: "2026-10-01T01:00:00Z"
+                        avg: 21.0
+                        min: 20.7
+                        max: 21.3
+                      - timestamp: "2026-10-01T02:00:00Z"
+                        avg: 20.6
+                        min: 20.4
+                        max: 20.9
+        '400':
+          description: Некорректные параметры (например, from позже to)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                badRange:
+                  value:
+                    type: "https://api.warmhouse.example/errors/validation"
+                    title: "Ошибка валидации"
+                    status: 400
+                    detail: "Параметр from должен быть раньше to"
+        '401':
+          description: Отсутствует или недействителен JWT
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: Устройство принадлежит другому пользователю
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Устройство не найдено в реестре телеметрии
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                notFound:
+                  value:
+                    type: "https://api.warmhouse.example/errors/device-not-found"
+                    title: "Устройство не найдено"
+                    status: 404
+        '500':
+          description: Внутренняя ошибка сервера
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    TelemetrySeries:
+      type: object
+      required: [device_id, metric, unit, from, to, points]
+      properties:
+        device_id:
+          type: string
+          format: uuid
+        metric:
+          type: string
+        unit:
+          type: string
+          example: celsius
+        interval:
+          type: string
+          nullable: true
+          description: Интервал агрегации; null для исходных точек
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+        points:
+          type: array
+          items:
+            $ref: '#/components/schemas/TelemetryPoint'
+    TelemetryPoint:
+      type: object
+      required: [timestamp]
+      description: |
+        Для исходных точек заполнено `value`, для агрегированных — `avg`, `min`, `max`
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        value:
+          type: number
+        avg:
+          type: number
+        min:
+          type: number
+        max:
+          type: number
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string

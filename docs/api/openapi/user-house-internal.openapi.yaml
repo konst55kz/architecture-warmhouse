@@ -1,0 +1,135 @@
+openapi: 3.0.3
+info:
+  title: User & House Service — внутренний API
+  version: 1.0.0
+  description: |
+    Внутренний API для синхронного взаимодействия микросервисов. Недоступен извне:
+    API Gateway не маршрутизирует путь `/internal`. Вызывающий сервис аутентифицируется
+    сервисным токеном (client credentials) и mTLS внутри кластера.
+
+    Основной потребитель — Device Management Service, который проверяет владение домом
+    при регистрации устройства. Клиент должен использовать таймаут (рекомендуется 500 мс),
+    повторы с экспоненциальной задержкой и circuit breaker.
+servers:
+  - url: http://user-house-service:8080/internal/v1
+    description: Адрес внутри кластера
+tags:
+  - name: Houses
+    description: Проверки, связанные с домами
+security:
+  - serviceAuth: []
+
+paths:
+  /houses/{houseId}/access:
+    get:
+      tags: [Houses]
+      operationId: checkHouseAccess
+      summary: Проверить доступ пользователя к дому
+      parameters:
+        - name: houseId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7"
+        - name: user_id
+          in: query
+          required: true
+          description: Пользователь, доступ которого проверяется
+          schema:
+            type: string
+            format: uuid
+          example: "0d9e8f7a-6b5c-4d3e-9f2a-1b0c9d8e7f6a"
+      responses:
+        '200':
+          description: |
+            Результат проверки. Отсутствие доступа — штатный результат (`has_access: false`),
+            а не ошибка, поэтому возвращается 200.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HouseAccess'
+              examples:
+                granted:
+                  summary: Пользователь — владелец дома
+                  value:
+                    house_id: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7"
+                    user_id: "0d9e8f7a-6b5c-4d3e-9f2a-1b0c9d8e7f6a"
+                    owner_id: "0d9e8f7a-6b5c-4d3e-9f2a-1b0c9d8e7f6a"
+                    has_access: true
+                denied:
+                  summary: Дом принадлежит другому пользователю
+                  value:
+                    house_id: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7"
+                    user_id: "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f"
+                    owner_id: "0d9e8f7a-6b5c-4d3e-9f2a-1b0c9d8e7f6a"
+                    has_access: false
+        '400':
+          description: Некорректный идентификатор
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          description: Не передан или недействителен сервисный токен
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Дом не найден
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                notFound:
+                  value:
+                    type: "https://api.warmhouse.example/errors/house-not-found"
+                    title: "Дом не найден"
+                    status: 404
+                    detail: "Дом 6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7 не найден"
+        '500':
+          description: Внутренняя ошибка сервера
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+components:
+  securitySchemes:
+    serviceAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Сервисный токен (OAuth 2.0 client credentials)
+  schemas:
+    HouseAccess:
+      type: object
+      required: [house_id, user_id, owner_id, has_access]
+      properties:
+        house_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        owner_id:
+          type: string
+          format: uuid
+        has_access:
+          type: boolean
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
