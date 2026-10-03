@@ -1,0 +1,40 @@
+@startuml component-device-gateway
+!include <C4/C4_Component>
+
+title Диаграмма компонентов: Device Gateway
+
+ContainerQueue(kafka, "Event Bus", "Apache Kafka", "События между сервисами")
+ContainerQueue(mqtt, "MQTT Broker", "EMQX", "Связь с устройствами")
+
+Container_Boundary(device_gw, "Device Gateway") {
+  Component(command_consumer, "Command Consumer", "Go, Kafka client", "Чтение device.commands")
+  Component(command_dispatcher, "Command Dispatcher", "Go", "Определение протокола и топика устройства, отправка команды через нужный адаптер")
+
+  Component(registry_consumer, "Device Events Consumer", "Go, Kafka client", "Чтение device.events")
+  Component(device_registry, "Device Registry", "Go, in-memory cache", "Кэш device_id → протокол, MQTT-топики")
+
+  Component(adapters, "Protocol Adapters", "Go", "Anti-Corruption Layer: перевод форматов производителей во внутренний формат и обратно (по адаптеру на протокол)")
+
+  Component(mqtt_client, "MQTT Client", "Go, paho.mqtt", "Подключение к брокеру, публикация команд, подписка на сообщения устройств")
+  Component(inbound_handler, "Inbound Message Handler", "Go", "Разбор входящих сообщений устройств: телеметрия, подтверждение команды или статус")
+  Component(event_producer, "Event Producer", "Go, Kafka client", "Публикация событий в Kafka")
+}
+
+Rel(kafka, command_consumer, "device.commands", "Kafka")
+Rel(command_consumer, command_dispatcher, "Команда")
+Rel(command_dispatcher, device_registry, "Протокол и топик устройства")
+Rel(command_dispatcher, adapters, "Кодирование команды")
+Rel(command_dispatcher, mqtt_client, "Публикация команды")
+
+Rel(kafka, registry_consumer, "device.events", "Kafka")
+Rel(registry_consumer, device_registry, "Добавление и удаление устройств")
+
+Rel(mqtt_client, mqtt, "Команды / подписка на сообщения устройств", "MQTT")
+Rel(mqtt_client, inbound_handler, "Входящее сообщение")
+Rel(inbound_handler, device_registry, "Определение устройства и протокола")
+Rel(inbound_handler, adapters, "Декодирование сообщения")
+Rel(inbound_handler, event_producer, "Нормализованное событие")
+Rel(event_producer, kafka, "telemetry.raw, device.status, device.command.status", "Kafka")
+
+SHOW_LEGEND()
+@enduml

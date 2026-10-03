@@ -1,0 +1,122 @@
+@startuml er-diagram
+title ER-диаграмма экосистемы «Тёплый дом»
+
+hide circle
+skinparam linetype ortho
+skinparam entity {
+  BackgroundColor #FEFEFE
+  BorderColor #444444
+}
+
+' ===== User Service =====
+package "User Service" #EEF5FF {
+  entity "User" as user {
+    * id : UUID <<PK>>
+    --
+    * email : VARCHAR(255) <<UNIQUE>>
+    * password_hash : VARCHAR(255)
+    * full_name : VARCHAR(255)
+    phone : VARCHAR(20)
+    * created_at : TIMESTAMP
+  }
+
+  entity "House" as house {
+    * id : UUID <<PK>>
+    --
+    * owner_id : UUID <<FK>>
+    * name : VARCHAR(100)
+    * address : VARCHAR(500)
+    * timezone : VARCHAR(50)
+    * created_at : TIMESTAMP
+  }
+}
+
+' ===== Device Service =====
+package "Device Service" #EEFFEE {
+  entity "Module" as module {
+    * id : UUID <<PK>>
+    --
+    * code : VARCHAR(50) <<UNIQUE>>
+    * name : VARCHAR(100)
+    description : TEXT
+  }
+
+  entity "HouseModule" as house_module {
+    * house_id : UUID <<PK, FK>>
+    * module_id : UUID <<PK, FK>>
+    --
+    * enabled : BOOLEAN
+    * connected_at : TIMESTAMP
+  }
+
+  entity "DeviceType" as device_type {
+    * id : UUID <<PK>>
+    --
+    * module_id : UUID <<FK>>
+    * name : VARCHAR(100)
+    * manufacturer : VARCHAR(100)
+    * model : VARCHAR(100)
+    * protocol : VARCHAR(30)
+    capabilities : JSONB
+  }
+
+  entity "Device" as device {
+    * id : UUID <<PK>>
+    --
+    * house_id : UUID <<FK>>
+    * type_id : UUID <<FK>>
+    * serial_number : VARCHAR(100) <<UNIQUE>>
+    * name : VARCHAR(100)
+    room : VARCHAR(100)
+    * status : VARCHAR(20)
+    firmware_version : VARCHAR(50)
+    last_seen_at : TIMESTAMP
+    * registered_at : TIMESTAMP
+  }
+
+  entity "DeviceCommand" as device_command {
+    * id : UUID <<PK>>
+    --
+    * device_id : UUID <<FK>>
+    * user_id : UUID <<FK>>
+    * command : VARCHAR(50)
+    payload : JSONB
+    * status : VARCHAR(20)
+    * created_at : TIMESTAMP
+    executed_at : TIMESTAMP
+  }
+}
+
+' ===== Telemetry Service =====
+package "Telemetry Service" #FFF5EE {
+  entity "TelemetryData" as telemetry {
+    * id : BIGINT <<PK>>
+    --
+    * device_id : UUID <<FK>>
+    * metric : VARCHAR(50)
+    * value : NUMERIC
+    * unit : VARCHAR(20)
+    * recorded_at : TIMESTAMP
+  }
+}
+
+' ===== Связи внутри сервисов =====
+user ||--o{ house : "владеет"
+module ||--o{ device_type : "включает"
+device_type ||--o{ device : "определяет тип"
+device ||--o{ device_command : "получает"
+module ||--o{ house_module : ""
+
+' ===== Связи между сервисами (логические, без физического FK) =====
+house ||..o{ house_module : "подключённые модули"
+house ||..o{ device : "содержит"
+user ||..o{ device_command : "инициирует"
+device ||..o{ telemetry : "генерирует"
+
+legend right
+  ● — обязательный атрибут (NOT NULL)
+  Сплошная линия — FK внутри одной БД сервиса
+  Пунктир — логическая ссылка между сервисами
+endlegend
+
+@enduml

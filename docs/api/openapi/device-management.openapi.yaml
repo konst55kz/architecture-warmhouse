@@ -1,0 +1,585 @@
+openapi: 3.0.3
+info:
+  title: Device Management Service API
+  version: 1.0.0
+  description: |
+    API сервиса управления устройствами экосистемы «Тёплый дом».
+
+    Сервис отвечает за регистрацию устройств, выдачу информации о них и приём команд.
+    Команды выполняются асинхронно: сервис сохраняет команду и сразу возвращает `202 Accepted`,
+    а фактическая доставка на устройство идёт через Kafka (`device.commands`) и Device Gateway.
+    Статус выполнения команды можно получить отдельным запросом.
+
+    Все запросы проходят через API Gateway, который проверяет JWT и передаёт его сервису.
+servers:
+  - url: https://api.warmhouse.example/api/v1
+    description: Публичный адрес через API Gateway
+tags:
+  - name: Devices
+    description: Регистрация устройств и информация о них
+  - name: Commands
+    description: Отправка команд устройствам и отслеживание их выполнения
+security:
+  - bearerAuth: []
+
+paths:
+  /devices:
+    post:
+      tags: [Devices]
+      operationId: registerDevice
+      summary: Зарегистрировать новое устройство
+      description: |
+        Привязывает устройство к дому пользователя по серийному номеру и ключу активации
+        (из QR-кода). Сервис синхронно проверяет в User & House Service, что дом принадлежит
+        пользователю, определяет тип устройства по серийному номеру и проверяет, что модуль
+        этого типа подключён к дому. После успешной регистрации публикуется событие
+        `device.registered`, устройство получает статус `registered` и может подключаться к MQTT-брокеру.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterDeviceRequest'
+            examples:
+              thermostat:
+                summary: Регистрация термостата
+                value:
+                  house_id: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7"
+                  serial_number: "WH-TH-2024-000153"
+                  activation_key: "K7Q2-M9XP-4RT8"
+                  name: "Термостат в гостиной"
+                  room: "Гостиная"
+      responses:
+        '201':
+          description: Устройство зарегистрировано
+          headers:
+            Location:
+              description: URL созданного устройства
+              schema:
+                type: string
+              example: /api/v1/devices/a3e1b2c4-5d6f-4a7b-8c9d-0e1f2a3b4c5d
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+              examples:
+                registered:
+                  value:
+                    id: "a3e1b2c4-5d6f-4a7b-8c9d-0e1f2a3b4c5d"
+                    house_id: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7"
+                    serial_number: "WH-TH-2024-000153"
+                    name: "Термостат в гостиной"
+                    room: "Гостиная"
+                    type:
+                      id: "1b2c3d4e-5f60-4a71-8b92-c3d4e5f6a7b8"
+                      name: "Термостат WarmHouse T1"
+                      manufacturer: "WarmHouse"
+                      module: "heating"
+                    status: "registered"
+                    firmware_version: null
+                    last_seen_at: null
+                    registered_at: "2026-10-01T09:15:00Z"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Дом не принадлежит пользователю
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                notOwner:
+                  value:
+                    type: "https://api.warmhouse.example/errors/house-access-denied"
+                    title: "Нет доступа к дому"
+                    status: 403
+                    detail: "Дом 6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7 не принадлежит пользователю"
+        '404':
+          description: Тип устройства с таким серийным номером не найден в каталоге
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                unknownSerial:
+                  value:
+                    type: "https://api.warmhouse.example/errors/device-type-not-found"
+                    title: "Неизвестное устройство"
+                    status: 404
+                    detail: "Серийный номер WH-XX-0000 не соответствует ни одному типу устройства"
+        '409':
+          description: Устройство уже зарегистрировано
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                alreadyRegistered:
+                  value:
+                    type: "https://api.warmhouse.example/errors/device-already-registered"
+                    title: "Устройство уже зарегистрировано"
+                    status: 409
+                    detail: "Устройство WH-TH-2024-000153 уже привязано к дому"
+        '422':
+          description: Неверный ключ активации или модуль не подключён к дому
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                moduleNotConnected:
+                  value:
+                    type: "https://api.warmhouse.example/errors/module-not-connected"
+                    title: "Модуль не подключён"
+                    status: 422
+                    detail: "Для устройства требуется модуль heating, он не подключён к дому"
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /devices/{deviceId}:
+    get:
+      tags: [Devices]
+      operationId: getDevice
+      summary: Получить информацию об устройстве
+      description: Возвращает данные устройства и его текущее состояние подключения.
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+      responses:
+        '200':
+          description: Информация об устройстве
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+              examples:
+                online:
+                  value:
+                    id: "a3e1b2c4-5d6f-4a7b-8c9d-0e1f2a3b4c5d"
+                    house_id: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7"
+                    serial_number: "WH-TH-2024-000153"
+                    name: "Термостат в гостиной"
+                    room: "Гостиная"
+                    type:
+                      id: "1b2c3d4e-5f60-4a71-8b92-c3d4e5f6a7b8"
+                      name: "Термостат WarmHouse T1"
+                      manufacturer: "WarmHouse"
+                      module: "heating"
+                    status: "online"
+                    firmware_version: "2.4.1"
+                    last_seen_at: "2026-10-01T10:42:17Z"
+                    registered_at: "2026-10-01T09:15:00Z"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/DeviceNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /devices/{deviceId}/commands:
+    post:
+      tags: [Commands]
+      operationId: sendCommand
+      summary: Отправить команду устройству
+      description: |
+        Принимает команду на изменение состояния устройства (включение, выключение,
+        установка температуры). Команда проверяется по возможностям (`capabilities`) типа
+        устройства, сохраняется со статусом `pending` и публикуется в топик `device.commands`.
+        Ответ возвращается сразу, не дожидаясь выполнения команды устройством.
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Ключ идемпотентности. Повторный запрос с тем же ключом вернёт уже созданную команду.
+          schema:
+            type: string
+            maxLength: 64
+          example: "5b7e9c1a-2f3d-4e5a-9b8c-7d6e5f4a3b2c"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendCommandRequest'
+            examples:
+              setTemperature:
+                summary: Установить температуру
+                value:
+                  command: "set_temperature"
+                  params:
+                    target_temperature: 22.5
+              turnOff:
+                summary: Выключить отопление
+                value:
+                  command: "turn_off"
+                  params: {}
+      responses:
+        '202':
+          description: Команда принята в обработку
+          headers:
+            Location:
+              description: URL для получения статуса команды
+              schema:
+                type: string
+              example: /api/v1/devices/a3e1b2c4-5d6f-4a7b-8c9d-0e1f2a3b4c5d/commands/c9d8e7f6-a5b4-4c3d-8e2f-1a0b9c8d7e6f
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Command'
+              examples:
+                accepted:
+                  value:
+                    id: "c9d8e7f6-a5b4-4c3d-8e2f-1a0b9c8d7e6f"
+                    device_id: "a3e1b2c4-5d6f-4a7b-8c9d-0e1f2a3b4c5d"
+                    command: "set_temperature"
+                    params:
+                      target_temperature: 22.5
+                    status: "pending"
+                    created_at: "2026-10-01T10:45:00Z"
+                    executed_at: null
+                    error_message: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/DeviceNotFound'
+        '422':
+          description: Команда не поддерживается типом устройства или параметры вне допустимого диапазона
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                outOfRange:
+                  value:
+                    type: "https://api.warmhouse.example/errors/invalid-command"
+                    title: "Недопустимая команда"
+                    status: 422
+                    detail: "target_temperature должна быть в диапазоне 5–30, получено 45"
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /devices/{deviceId}/commands/{commandId}:
+    get:
+      tags: [Commands]
+      operationId: getCommand
+      summary: Получить статус команды
+      description: |
+        Возвращает текущий статус команды. Статус меняется по событиям от устройства
+        (`device.command.status`): `pending` → `sent` → `acknowledged` или `failed`.
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+        - name: commandId
+          in: path
+          required: true
+          description: Идентификатор команды
+          schema:
+            type: string
+            format: uuid
+          example: "c9d8e7f6-a5b4-4c3d-8e2f-1a0b9c8d7e6f"
+      responses:
+        '200':
+          description: Статус команды
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Command'
+              examples:
+                acknowledged:
+                  summary: Команда выполнена
+                  value:
+                    id: "c9d8e7f6-a5b4-4c3d-8e2f-1a0b9c8d7e6f"
+                    device_id: "a3e1b2c4-5d6f-4a7b-8c9d-0e1f2a3b4c5d"
+                    command: "set_temperature"
+                    params:
+                      target_temperature: 22.5
+                    status: "acknowledged"
+                    created_at: "2026-10-01T10:45:00Z"
+                    executed_at: "2026-10-01T10:45:02Z"
+                    error_message: null
+                failed:
+                  summary: Устройство отклонило команду
+                  value:
+                    id: "c9d8e7f6-a5b4-4c3d-8e2f-1a0b9c8d7e6f"
+                    device_id: "a3e1b2c4-5d6f-4a7b-8c9d-0e1f2a3b4c5d"
+                    command: "set_temperature"
+                    params:
+                      target_temperature: 22.5
+                    status: "failed"
+                    created_at: "2026-10-01T10:45:00Z"
+                    executed_at: "2026-10-01T10:45:03Z"
+                    error_message: "Устройство в аварийном режиме"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Устройство или команда не найдены
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                commandNotFound:
+                  value:
+                    type: "https://api.warmhouse.example/errors/command-not-found"
+                    title: "Команда не найдена"
+                    status: 404
+                    detail: "Команда c9d8e7f6-a5b4-4c3d-8e2f-1a0b9c8d7e6f не найдена"
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT, выпущенный User & House Service
+
+  parameters:
+    DeviceId:
+      name: deviceId
+      in: path
+      required: true
+      description: Идентификатор устройства
+      schema:
+        type: string
+        format: uuid
+      example: "a3e1b2c4-5d6f-4a7b-8c9d-0e1f2a3b4c5d"
+
+  schemas:
+    RegisterDeviceRequest:
+      type: object
+      required: [house_id, serial_number, activation_key, name]
+      properties:
+        house_id:
+          type: string
+          format: uuid
+          description: Дом, к которому привязывается устройство
+        serial_number:
+          type: string
+          maxLength: 100
+          description: Серийный номер с корпуса или из QR-кода
+        activation_key:
+          type: string
+          maxLength: 64
+          description: Ключ активации из QR-кода. Сервис хранит только его хеш
+        name:
+          type: string
+          maxLength: 100
+          description: Название устройства, которое видит пользователь
+        room:
+          type: string
+          maxLength: 100
+          description: Комната, в которой установлено устройство
+
+    DeviceTypeSummary:
+      type: object
+      required: [id, name, manufacturer, module]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        manufacturer:
+          type: string
+        module:
+          type: string
+          description: Код модуля, к которому относится тип устройства
+          example: heating
+
+    Device:
+      type: object
+      required: [id, house_id, serial_number, name, type, status, registered_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        house_id:
+          type: string
+          format: uuid
+        serial_number:
+          type: string
+        name:
+          type: string
+        room:
+          type: string
+          nullable: true
+        type:
+          $ref: '#/components/schemas/DeviceTypeSummary'
+        status:
+          $ref: '#/components/schemas/DeviceStatus'
+        firmware_version:
+          type: string
+          nullable: true
+        last_seen_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Время последнего сообщения от устройства
+        registered_at:
+          type: string
+          format: date-time
+
+    DeviceStatus:
+      type: string
+      enum: [registered, online, offline, error]
+      description: |
+        `registered` — зарегистрировано, ещё не подключалось;
+        `online` — на связи; `offline` — не на связи; `error` — сообщило об ошибке
+
+    SendCommandRequest:
+      type: object
+      required: [command]
+      properties:
+        command:
+          type: string
+          description: Название команды из capabilities типа устройства
+          enum: [turn_on, turn_off, set_temperature]
+        params:
+          type: object
+          description: Параметры команды. Набор зависит от команды
+          additionalProperties: true
+          properties:
+            target_temperature:
+              type: number
+              format: float
+              description: Целевая температура в °C (для set_temperature)
+
+    Command:
+      type: object
+      required: [id, device_id, command, status, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        device_id:
+          type: string
+          format: uuid
+        command:
+          type: string
+        params:
+          type: object
+          additionalProperties: true
+        status:
+          type: string
+          enum: [pending, sent, acknowledged, failed]
+        created_at:
+          type: string
+          format: date-time
+        executed_at:
+          type: string
+          format: date-time
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+
+    Problem:
+      type: object
+      description: Описание ошибки в формате RFC 7807
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+
+  responses:
+    BadRequest:
+      description: Некорректный запрос (ошибка валидации)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            validation:
+              value:
+                type: "https://api.warmhouse.example/errors/validation"
+                title: "Ошибка валидации"
+                status: 400
+                detail: "Поле serial_number обязательно"
+    Unauthorized:
+      description: Отсутствует или недействителен JWT
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            unauthorized:
+              value:
+                type: "https://api.warmhouse.example/errors/unauthorized"
+                title: "Требуется аутентификация"
+                status: 401
+    Forbidden:
+      description: Устройство принадлежит другому пользователю
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            forbidden:
+              value:
+                type: "https://api.warmhouse.example/errors/forbidden"
+                title: "Нет доступа"
+                status: 403
+                detail: "Устройство принадлежит другому пользователю"
+    DeviceNotFound:
+      description: Устройство не найдено
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            notFound:
+              value:
+                type: "https://api.warmhouse.example/errors/device-not-found"
+                title: "Устройство не найдено"
+                status: 404
+                detail: "Устройство a3e1b2c4-5d6f-4a7b-8c9d-0e1f2a3b4c5d не найдено"
+    InternalError:
+      description: Внутренняя ошибка сервера
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            internal:
+              value:
+                type: "https://api.warmhouse.example/errors/internal"
+                title: "Внутренняя ошибка сервера"
+                status: 500
+    ServiceUnavailable:
+      description: Зависимый сервис (User & House Service) недоступен
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Через сколько секунд повторить запрос
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            unavailable:
+              value:
+                type: "https://api.warmhouse.example/errors/dependency-unavailable"
+                title: "Сервис временно недоступен"
+                status: 503
+                detail: "Не удалось проверить владение домом, повторите запрос позже"

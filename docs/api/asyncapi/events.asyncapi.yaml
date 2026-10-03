@@ -1,0 +1,476 @@
+asyncapi: 3.0.0
+info:
+  title: Шина событий экосистемы «Тёплый дом»
+  version: 1.0.0
+  description: |
+    Асинхронное взаимодействие микросервисов через Apache Kafka.
+
+    Общие правила для всех топиков:
+    * ключ сообщения — `device_id` (или `house_id` для `house.events`), поэтому события
+      одного устройства обрабатываются строго по порядку;
+    * каждое сообщение содержит `event_id` — потребители используют его для идемпотентной
+      обработки, так как Kafka гарантирует доставку «хотя бы один раз»;
+    * время передаётся в UTC в формате ISO 8601;
+    * события из Device Management Service и User & House Service публикуются через
+      Transactional Outbox.
+servers:
+  production:
+    host: kafka:9092
+    protocol: kafka
+    description: Kafka-кластер внутри платформы
+
+channels:
+  deviceCommands:
+    address: device.commands
+    description: Команды, которые нужно доставить на устройства
+    messages:
+      deviceCommand:
+        $ref: '#/components/messages/DeviceCommand'
+  deviceCommandStatus:
+    address: device.command.status
+    description: Изменение статуса выполнения команды
+    messages:
+      commandStatusChanged:
+        $ref: '#/components/messages/CommandStatusChanged'
+  deviceStatus:
+    address: device.status
+    description: Изменение состояния подключения устройства
+    messages:
+      deviceStatusChanged:
+        $ref: '#/components/messages/DeviceStatusChanged'
+  deviceEvents:
+    address: device.events
+    description: Жизненный цикл устройства в системе (регистрация, удаление)
+    messages:
+      deviceRegistered:
+        $ref: '#/components/messages/DeviceRegistered'
+      deviceDeleted:
+        $ref: '#/components/messages/DeviceDeleted'
+  telemetryRaw:
+    address: telemetry.raw
+    description: Поток показаний датчиков
+    messages:
+      telemetryMeasured:
+        $ref: '#/components/messages/TelemetryMeasured'
+  houseEvents:
+    address: house.events
+    description: Жизненный цикл дома
+    messages:
+      houseDeleted:
+        $ref: '#/components/messages/HouseDeleted'
+
+operations:
+  publishDeviceCommand:
+    action: send
+    channel:
+      $ref: '#/channels/deviceCommands'
+    summary: Device Management Service публикует принятую команду
+    messages:
+      - $ref: '#/channels/deviceCommands/messages/deviceCommand'
+  consumeDeviceCommand:
+    action: receive
+    channel:
+      $ref: '#/channels/deviceCommands'
+    summary: Device Gateway получает команду и доставляет её на устройство через MQTT
+    messages:
+      - $ref: '#/channels/deviceCommands/messages/deviceCommand'
+
+  publishCommandStatus:
+    action: send
+    channel:
+      $ref: '#/channels/deviceCommandStatus'
+    summary: Device Gateway публикует статус команды (отправлена, подтверждена устройством, ошибка)
+    messages:
+      - $ref: '#/channels/deviceCommandStatus/messages/commandStatusChanged'
+  consumeCommandStatus:
+    action: receive
+    channel:
+      $ref: '#/channels/deviceCommandStatus'
+    summary: Device Management Service обновляет статус DeviceCommand
+    messages:
+      - $ref: '#/channels/deviceCommandStatus/messages/commandStatusChanged'
+
+  publishDeviceStatus:
+    action: send
+    channel:
+      $ref: '#/channels/deviceStatus'
+    summary: Device Gateway публикует изменение статуса подключения устройства
+    messages:
+      - $ref: '#/channels/deviceStatus/messages/deviceStatusChanged'
+  consumeDeviceStatus:
+    action: receive
+    channel:
+      $ref: '#/channels/deviceStatus'
+    summary: Device Management Service обновляет status и last_seen_at устройства
+    messages:
+      - $ref: '#/channels/deviceStatus/messages/deviceStatusChanged'
+
+  publishDeviceEvents:
+    action: send
+    channel:
+      $ref: '#/channels/deviceEvents'
+    summary: Device Management Service сообщает о регистрации и удалении устройств
+    messages:
+      - $ref: '#/channels/deviceEvents/messages/deviceRegistered'
+      - $ref: '#/channels/deviceEvents/messages/deviceDeleted'
+  consumeDeviceEvents:
+    action: receive
+    channel:
+      $ref: '#/channels/deviceEvents'
+    summary: Device Gateway и Telemetry Service обновляют свои реестры устройств
+    messages:
+      - $ref: '#/channels/deviceEvents/messages/deviceRegistered'
+      - $ref: '#/channels/deviceEvents/messages/deviceDeleted'
+
+  publishTelemetry:
+    action: send
+    channel:
+      $ref: '#/channels/telemetryRaw'
+    summary: Device Gateway публикует нормализованные показания устройств
+    messages:
+      - $ref: '#/channels/telemetryRaw/messages/telemetryMeasured'
+  consumeTelemetry:
+    action: receive
+    channel:
+      $ref: '#/channels/telemetryRaw'
+    summary: Telemetry Service сохраняет показания в TimescaleDB
+    messages:
+      - $ref: '#/channels/telemetryRaw/messages/telemetryMeasured'
+
+  publishHouseEvents:
+    action: send
+    channel:
+      $ref: '#/channels/houseEvents'
+    summary: User & House Service сообщает об удалении дома
+    messages:
+      - $ref: '#/channels/houseEvents/messages/houseDeleted'
+  consumeHouseEvents:
+    action: receive
+    channel:
+      $ref: '#/channels/houseEvents'
+    summary: Device Management Service отвязывает устройства удалённого дома
+    messages:
+      - $ref: '#/channels/houseEvents/messages/houseDeleted'
+
+components:
+  messages:
+    DeviceCommand:
+      name: DeviceCommand
+      title: Команда устройству
+      contentType: application/json
+      bindings:
+        kafka:
+          key:
+            type: string
+            format: uuid
+            description: device_id
+          bindingVersion: '0.5.0'
+      payload:
+        $ref: '#/components/schemas/DeviceCommandPayload'
+      examples:
+        - name: setTemperature
+          summary: Установить 22.5 °C
+          payload:
+            event_id: "e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b"
+            occurred_at: "2026-10-01T10:45:00Z"
+            command_id: "c9d8e7f6-a5b4-4c3d-8e2f-1a0b9c8d7e6f"
+            device_id: "a3e1b2c4-5d6f-4a7b-8c9d-0e1f2a3b4c5d"
+            command: "set_temperature"
+            params:
+              target_temperature: 22.5
+            expires_at: "2026-10-01T10:50:00Z"
+
+    CommandStatusChanged:
+      name: CommandStatusChanged
+      title: Статус команды изменился
+      contentType: application/json
+      bindings:
+        kafka:
+          key:
+            type: string
+            format: uuid
+            description: device_id
+          bindingVersion: '0.5.0'
+      payload:
+        $ref: '#/components/schemas/CommandStatusPayload'
+      examples:
+        - name: acknowledged
+          summary: Устройство выполнило команду
+          payload:
+            event_id: "f2a3b4c5-d6e7-4f8a-9b0c-1d2e3f4a5b6c"
+            occurred_at: "2026-10-01T10:45:02Z"
+            command_id: "c9d8e7f6-a5b4-4c3d-8e2f-1a0b9c8d7e6f"
+            device_id: "a3e1b2c4-5d6f-4a7b-8c9d-0e1f2a3b4c5d"
+            status: "acknowledged"
+            error_message: null
+        - name: failed
+          summary: Устройство отклонило команду
+          payload:
+            event_id: "a3b4c5d6-e7f8-4a9b-8c1d-2e3f4a5b6c7d"
+            occurred_at: "2026-10-01T10:45:03Z"
+            command_id: "c9d8e7f6-a5b4-4c3d-8e2f-1a0b9c8d7e6f"
+            device_id: "a3e1b2c4-5d6f-4a7b-8c9d-0e1f2a3b4c5d"
+            status: "failed"
+            error_message: "Устройство в аварийном режиме"
+
+    DeviceStatusChanged:
+      name: DeviceStatusChanged
+      title: Статус подключения устройства изменился
+      contentType: application/json
+      bindings:
+        kafka:
+          key:
+            type: string
+            format: uuid
+            description: device_id
+          bindingVersion: '0.5.0'
+      payload:
+        $ref: '#/components/schemas/DeviceStatusPayload'
+      examples:
+        - name: online
+          summary: Устройство вышло на связь
+          payload:
+            event_id: "b4c5d6e7-f8a9-4b0c-9d2e-3f4a5b6c7d8e"
+            occurred_at: "2026-10-01T09:16:30Z"
+            device_id: "a3e1b2c4-5d6f-4a7b-8c9d-0e1f2a3b4c5d"
+            status: "online"
+            firmware_version: "2.4.1"
+
+    DeviceRegistered:
+      name: DeviceRegistered
+      title: Устройство зарегистрировано
+      contentType: application/json
+      bindings:
+        kafka:
+          key:
+            type: string
+            format: uuid
+            description: device_id
+          bindingVersion: '0.5.0'
+      payload:
+        $ref: '#/components/schemas/DeviceRegisteredPayload'
+      examples:
+        - name: thermostat
+          payload:
+            event_id: "c5d6e7f8-a9b0-4c1d-8e3f-4a5b6c7d8e9f"
+            event_type: "device.registered"
+            occurred_at: "2026-10-01T09:15:00Z"
+            device_id: "a3e1b2c4-5d6f-4a7b-8c9d-0e1f2a3b4c5d"
+            house_id: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7"
+            owner_id: "0d9e8f7a-6b5c-4d3e-9f2a-1b0c9d8e7f6a"
+            type_id: "1b2c3d4e-5f60-4a71-8b92-c3d4e5f6a7b8"
+            protocol: "warmhouse-v2"
+
+    DeviceDeleted:
+      name: DeviceDeleted
+      title: Устройство удалено
+      contentType: application/json
+      bindings:
+        kafka:
+          key:
+            type: string
+            format: uuid
+            description: device_id
+          bindingVersion: '0.5.0'
+      payload:
+        $ref: '#/components/schemas/DeviceDeletedPayload'
+      examples:
+        - name: deleted
+          payload:
+            event_id: "d6e7f8a9-b0c1-4d2e-9f4a-5b6c7d8e9f0a"
+            event_type: "device.deleted"
+            occurred_at: "2026-10-05T18:00:00Z"
+            device_id: "a3e1b2c4-5d6f-4a7b-8c9d-0e1f2a3b4c5d"
+            house_id: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7"
+
+    TelemetryMeasured:
+      name: TelemetryMeasured
+      title: Новое показание датчика
+      contentType: application/json
+      bindings:
+        kafka:
+          key:
+            type: string
+            format: uuid
+            description: device_id
+          bindingVersion: '0.5.0'
+      payload:
+        $ref: '#/components/schemas/TelemetryPayload'
+      examples:
+        - name: temperature
+          summary: Новое измерение температуры
+          payload:
+            event_id: "e7f8a9b0-c1d2-4e3f-8a5b-6c7d8e9f0a1b"
+            occurred_at: "2026-10-01T10:42:17Z"
+            device_id: "a3e1b2c4-5d6f-4a7b-8c9d-0e1f2a3b4c5d"
+            metric: "temperature"
+            value: 21.3
+            unit: "celsius"
+
+    HouseDeleted:
+      name: HouseDeleted
+      title: Дом удалён
+      contentType: application/json
+      bindings:
+        kafka:
+          key:
+            type: string
+            format: uuid
+            description: house_id
+          bindingVersion: '0.5.0'
+      payload:
+        $ref: '#/components/schemas/HouseDeletedPayload'
+      examples:
+        - name: deleted
+          payload:
+            event_id: "f8a9b0c1-d2e3-4f4a-9b6c-7d8e9f0a1b2c"
+            event_type: "house.deleted"
+            occurred_at: "2026-10-10T12:00:00Z"
+            house_id: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7"
+            owner_id: "0d9e8f7a-6b5c-4d3e-9f2a-1b0c9d8e7f6a"
+
+  schemas:
+    EventBase:
+      type: object
+      required: [event_id, occurred_at]
+      properties:
+        event_id:
+          type: string
+          format: uuid
+          description: Уникальный идентификатор события для идемпотентной обработки
+        occurred_at:
+          type: string
+          format: date-time
+          description: Время возникновения события (UTC)
+
+    DeviceCommandPayload:
+      allOf:
+        - $ref: '#/components/schemas/EventBase'
+        - type: object
+          required: [command_id, device_id, command]
+          properties:
+            command_id:
+              type: string
+              format: uuid
+            device_id:
+              type: string
+              format: uuid
+            command:
+              type: string
+              enum: [turn_on, turn_off, set_temperature]
+            params:
+              type: object
+              additionalProperties: true
+            expires_at:
+              type: string
+              format: date-time
+              description: После этого времени команду не нужно доставлять, Device Gateway отправит статус failed
+
+    CommandStatusPayload:
+      allOf:
+        - $ref: '#/components/schemas/EventBase'
+        - type: object
+          required: [command_id, device_id, status]
+          properties:
+            command_id:
+              type: string
+              format: uuid
+            device_id:
+              type: string
+              format: uuid
+            status:
+              type: string
+              enum: [sent, acknowledged, failed]
+            error_message:
+              type: [string, 'null']
+
+    DeviceStatusPayload:
+      allOf:
+        - $ref: '#/components/schemas/EventBase'
+        - type: object
+          required: [device_id, status]
+          properties:
+            device_id:
+              type: string
+              format: uuid
+            status:
+              type: string
+              enum: [online, offline, error]
+            firmware_version:
+              type: string
+
+    DeviceRegisteredPayload:
+      allOf:
+        - $ref: '#/components/schemas/EventBase'
+        - type: object
+          required: [event_type, device_id, house_id, owner_id, type_id, protocol]
+          properties:
+            event_type:
+              type: string
+              const: device.registered
+            device_id:
+              type: string
+              format: uuid
+            house_id:
+              type: string
+              format: uuid
+            owner_id:
+              type: string
+              format: uuid
+              description: Нужен Telemetry Service для проверки доступа к показаниям
+            type_id:
+              type: string
+              format: uuid
+            protocol:
+              type: string
+              description: Протокол устройства, по нему Device Gateway выбирает адаптер
+
+    DeviceDeletedPayload:
+      allOf:
+        - $ref: '#/components/schemas/EventBase'
+        - type: object
+          required: [event_type, device_id, house_id]
+          properties:
+            event_type:
+              type: string
+              const: device.deleted
+            device_id:
+              type: string
+              format: uuid
+            house_id:
+              type: string
+              format: uuid
+
+    TelemetryPayload:
+      allOf:
+        - $ref: '#/components/schemas/EventBase'
+        - type: object
+          required: [device_id, metric, value, unit]
+          properties:
+            device_id:
+              type: string
+              format: uuid
+            metric:
+              type: string
+              examples: [temperature, humidity]
+            value:
+              type: number
+            unit:
+              type: string
+              examples: [celsius, percent]
+
+    HouseDeletedPayload:
+      allOf:
+        - $ref: '#/components/schemas/EventBase'
+        - type: object
+          required: [event_type, house_id, owner_id]
+          properties:
+            event_type:
+              type: string
+              const: house.deleted
+            house_id:
+              type: string
+              format: uuid
+            owner_id:
+              type: string
+              format: uuid
